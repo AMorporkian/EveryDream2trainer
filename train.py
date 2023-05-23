@@ -356,7 +356,7 @@ def shrink_and_perturb(model, _lambda=0.5, sigma=0.01):
         for name, param in model.named_parameters():
             if 'weight' in name: 
                 param.data *= _lambda
-                param.data += torch.normal(0.0, sigma, size=param.size, device=model.device)
+                param.data += torch.normal(0.0, sigma, size=param.shape).to(model.device)
 
 def main(args):
     """
