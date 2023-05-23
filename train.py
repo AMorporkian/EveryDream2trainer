@@ -144,6 +144,16 @@ def setup_local_logger(args):
 #     """
 #     optimizer.load_state_dict(torch.load(path))
 
+def exponential_moving_average(l, decay=0.99):
+    """
+    computes the exponential moving average of a list
+    """
+    ema = 0
+    for i, v in enumerate(l):
+        ema = decay * ema + (1 - decay) * v
+        l[i] = ema
+    return l
+    
 def get_gpu_memory(nvsmi):
     """
     returns the gpu memory usage
@@ -774,7 +784,7 @@ def main(args):
                 loss_epoch.append(loss_step)
 
                 if (global_step + 1) % args.log_step == 0:
-                    loss_local = sum(loss_log_step) / len(loss_log_step)
+                    loss_local = exponential_moving_average(loss_log_step)
                     lr_unet = ed_optimizer.get_unet_lr()
                     lr_textenc = ed_optimizer.get_textenc_lr()
                     loss_log_step = []
