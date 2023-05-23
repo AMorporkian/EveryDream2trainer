@@ -456,7 +456,7 @@ def main(args):
         traceback.print_exc()
         logging.error(" * Failed to load checkpoint *")
         raise
-
+    
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
         text_encoder.gradient_checkpointing_enable()
@@ -571,7 +571,19 @@ def main(args):
 
     global interrupted
     interrupted = False
+    def shrink_and_perturb(model, _lambda=0.5, sigma=0.01):
+        for name, param in model.named_parameters():
+            if 'weight' in name: 
+                param.data *= _lambda
+                param.data += torch.normal(0.0, sigma, size=(param.shape[0], param.shape[1]))
+    
+    logging.info("Shrinking by .5 and perturbing by .01")
+    
+    shrink_and_perturb(unet)
+    shrink_and_perturb(text_encoder)
 
+    logging.info("Done")
+    
     def sigterm_handler(signum, frame):
         """
         handles sigterm
@@ -600,6 +612,7 @@ def main(args):
     if not os.path.exists(f"{log_folder}/samples/"):
         os.makedirs(f"{log_folder}/samples/")
 
+    logging.info("Shrinking/perturbing by }")
     if gpu is not None:
         gpu_used_mem, gpu_total_mem = gpu.get_gpu_memory()
         logging.info(f" Pretraining GPU Memory: {gpu_used_mem} / {gpu_total_mem} MB")
