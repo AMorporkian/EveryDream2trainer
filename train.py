@@ -356,7 +356,7 @@ def shrink_and_perturb(model, _lambda=0.5, sigma=0.01):
         for name, param in model.named_parameters():
             if 'weight' in name: 
                 param.data *= _lambda
-                param.data += torch.normal(0.0, sigma, size=(param.shape[0], param.shape[1]))
+                param.data += torch.normal(0.0, sigma, size=param.size, device=model.device)
 
 def main(args):
     """
@@ -911,7 +911,7 @@ if __name__ == "__main__":
     argparser.add_argument("--seed", type=int, default=555, help="seed used for samples and shuffling, use -1 for random")
     argparser.add_argument("--shuffle_tags", action="store_true", default=False, help="randomly shuffles CSV tags in captions, for booru datasets")
     argparser.add_argument("--squeeze_lambda", type=float, default=None, help="Squeeze loss lambda, (def: do not perform squeezing)")
-    argparser.add_argument("--squeeze-sigma", type=float, default=None, help="Squeeze loss sigma, (def: do not perform squeezing)")
+    argparser.add_argument("--squeeze_sigma", type=float, default=None, help="Squeeze loss sigma, (def: do not perform squeezing)")
     argparser.add_argument("--useadam8bit", action="store_true", default=False, help="deprecated, use --optimizer_config and optimizer.json instead")
     argparser.add_argument("--wandb", action="store_true", default=False, help="enable wandb logging instead of tensorboard, requires env var WANDB_API_KEY")
     argparser.add_argument("--validation_config", default=None, help="Path to a JSON configuration file for the validator.  Default is no validation.")
