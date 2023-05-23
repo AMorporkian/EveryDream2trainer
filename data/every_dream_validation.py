@@ -177,6 +177,7 @@ class EveryDreamValidator:
                                        global_step=global_step)
             dataset.track_loss_trend(mean_loss)
             if math.isnan(mean_loss): 
+                logging.error(f"Validation loss is NaN, exiting...")
                 sys.exit(0)
 
 
