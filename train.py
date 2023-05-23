@@ -815,7 +815,7 @@ def main(args):
 
                 del batch
                 global_step += 1
-                if math.isnan(loss_log_step):
+                if math.isnan(loss_log_step[-1]):
                     logging.error("Exiting due to loss being NaN...")
                     sys.exit(0)
                 # end of step
