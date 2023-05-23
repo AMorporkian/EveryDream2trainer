@@ -144,10 +144,11 @@ def setup_local_logger(args):
 #     """
 #     optimizer.load_state_dict(torch.load(path))
 
-def exponential_moving_average(l, decay=0.99) -> list:
+def exponential_moving_average(l: list, decay=0.99) -> list:
     """
     computes the exponential moving average of a list
     """
+    l = l.copy()
     ema = 0
     for i, v in enumerate(l):
         ema = decay * ema + (1 - decay) * v
