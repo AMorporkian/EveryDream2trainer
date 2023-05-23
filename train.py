@@ -815,6 +815,9 @@ def main(args):
 
                 del batch
                 global_step += 1
+                if math.isnan(loss_log_step):
+                    logging.error("Exiting due to loss being NaN...")
+                    sys.exit(0)
                 # end of step
 
             steps_pbar.close()
@@ -829,10 +832,7 @@ def main(args):
                 write_batch_schedule(args, log_folder, train_batch, epoch + 1)
 
             loss_local = sum(loss_epoch) / len(loss_epoch)
-            if epoch > 0:
-                if math.isnan(loss_local): sys.exit(0)
             log_writer.add_scalar(tag="loss/epoch", scalar_value=loss_local, global_step=global_step)
-            
 
             gc.collect()
             # end of epoch
