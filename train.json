@@ -35,6 +35,8 @@
   "scale_lr": false,
   "seed": 555,
   "shuffle_tags": false,
+  "squeeze_lambda": 0.5,
+  "squeeze_sigma": 0.01,
   "validation_config": "validation_default.json",
   "wandb": false,
   "write_schedule": false,

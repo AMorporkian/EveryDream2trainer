@@ -352,6 +352,11 @@ def log_args(log_writer, args):
         arglog += f"{arg}={value}, "
     log_writer.add_text("config", arglog)
 
+def shrink_and_perturb(model, _lambda=0.5, sigma=0.01):
+        for name, param in model.named_parameters():
+            if 'weight' in name: 
+                param.data *= _lambda
+                param.data += torch.normal(0.0, sigma, size=(param.shape[0], param.shape[1]))
 
 def main(args):
     """
@@ -447,7 +452,11 @@ def main(args):
             vae = pipe.vae
             unet = pipe.unet
             del pipe
-
+        if args.squeeze_lambda is not None:
+            logging.info(f" * Squeezing model with lambda={args.squeeze_lambda} and sigma={args.squeeze_sigma}")
+            shrink_and_perturb(unet, args.squeeze_lambda, args.squeeze_sigma)
+            shrink_and_perturb(text_encoder, args.squeeze_lambda, args.squeeze_sigma)
+        
         reference_scheduler = DDIMScheduler.from_pretrained(model_root_folder, subfolder="scheduler")
         noise_scheduler = DDPMScheduler.from_pretrained(model_root_folder, subfolder="scheduler")
         tokenizer = CLIPTokenizer.from_pretrained(model_root_folder, subfolder="tokenizer", use_fast=False)
@@ -571,12 +580,7 @@ def main(args):
 
     global interrupted
     interrupted = False
-    def shrink_and_perturb(model, _lambda=0.5, sigma=0.01):
-        for name, param in model.named_parameters():
-            if 'weight' in name: 
-                param.data *= _lambda
-                param.data += torch.normal(0.0, sigma, size=(param.shape[0], param.shape[1]))
-    
+
     logging.info("Shrinking by .5 and perturbing by .01")
     
     shrink_and_perturb(unet)
@@ -906,6 +910,8 @@ if __name__ == "__main__":
     argparser.add_argument("--save_optimizer", action="store_true", default=False, help="saves optimizer state with ckpt, useful for resuming training later")
     argparser.add_argument("--seed", type=int, default=555, help="seed used for samples and shuffling, use -1 for random")
     argparser.add_argument("--shuffle_tags", action="store_true", default=False, help="randomly shuffles CSV tags in captions, for booru datasets")
+    argparser.add_argument("--squeeze_lambda", type=float, default=None, help="Squeeze loss lambda, (def: do not perform squeezing)")
+    argparser.add_argument("--squeeze-sigma", type=float, default=None, help="Squeeze loss sigma, (def: do not perform squeezing)")
     argparser.add_argument("--useadam8bit", action="store_true", default=False, help="deprecated, use --optimizer_config and optimizer.json instead")
     argparser.add_argument("--wandb", action="store_true", default=False, help="enable wandb logging instead of tensorboard, requires env var WANDB_API_KEY")
     argparser.add_argument("--validation_config", default=None, help="Path to a JSON configuration file for the validator.  Default is no validation.")
