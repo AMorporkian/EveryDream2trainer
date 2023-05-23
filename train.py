@@ -725,8 +725,6 @@ def main(args):
     if validator:
         validator.do_validation(global_step=0,
                                 get_model_prediction_and_target_callable=get_model_prediction_and_target)
-    if epoch > 0:
-        if math.isnan(loss_epoch): sys.exit(0)
     # the sample generator might be configured to generate samples before step 0
     if sample_generator.generate_pretrain_samples:
         _, batch = next(enumerate(train_dataloader))
@@ -831,6 +829,8 @@ def main(args):
                 write_batch_schedule(args, log_folder, train_batch, epoch + 1)
 
             loss_local = sum(loss_epoch) / len(loss_epoch)
+            if epoch > 0:
+                if math.isnan(loss_local): sys.exit(0)
             log_writer.add_scalar(tag="loss/epoch", scalar_value=loss_local, global_step=global_step)
             
 
