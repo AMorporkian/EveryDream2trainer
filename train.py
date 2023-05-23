@@ -144,7 +144,7 @@ def setup_local_logger(args):
 #     """
 #     optimizer.load_state_dict(torch.load(path))
 
-def exponential_moving_average(l, decay=0.99):
+def exponential_moving_average(l, decay=0.99) -> list:
     """
     computes the exponential moving average of a list
     """
@@ -152,7 +152,7 @@ def exponential_moving_average(l, decay=0.99):
     for i, v in enumerate(l):
         ema = decay * ema + (1 - decay) * v
         l[i] = ema
-    return l
+    return ema
     
 def get_gpu_memory(nvsmi):
     """
