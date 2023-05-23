@@ -587,11 +587,6 @@ def main(args):
     global interrupted
     interrupted = False
 
-    logging.info("Shrinking by .5 and perturbing by .01")
-    
-    shrink_and_perturb(unet)
-    shrink_and_perturb(text_encoder)
-
     logging.info("Done")
     
     def sigterm_handler(signum, frame):
