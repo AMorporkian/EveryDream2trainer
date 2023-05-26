@@ -41,6 +41,6 @@
     "text_encoder_freezing": {
         "freeze_embeddings": false,
         "freeze_front_n_layers": null,
-        "freeze_final_layer_norm": false
+        "freeze_final_layer_norm": true
     }
 }

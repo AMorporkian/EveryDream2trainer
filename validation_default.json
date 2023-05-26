@@ -18,7 +18,7 @@
     "extra_manual_datasets" : {},
     "stabilize_training_loss": false,
     "stabilize_split_proportion": 0.15,
-    "every_n_epochs": 1,
+    "every_n_epochs": 10,
     "seed": 555,
     "use_relative_loss": false
 }

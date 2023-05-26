@@ -3,6 +3,7 @@ import logging
 import math
 import random
 from dataclasses import dataclass, field
+import sys
 from typing import Callable, Any, Optional, Generator
 from argparse import Namespace
 
@@ -175,7 +176,6 @@ class EveryDreamValidator:
                                        scalar_value=mean_loss,
                                        global_step=global_step)
             dataset.track_loss_trend(mean_loss)
-
 
     def _calculate_validation_loss(self, tag, dataloader, get_model_prediction_and_target: Callable[
         [Any, Any], tuple[torch.Tensor, torch.Tensor]]) -> float:

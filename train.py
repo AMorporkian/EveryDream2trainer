@@ -144,6 +144,12 @@ def setup_local_logger(args):
 #     """
 #     optimizer.load_state_dict(torch.load(path))
 
+def ave(l):
+    """
+    Returns an average focusing on the last 10% of the list
+    """
+    return sum(l[int(len(l) * 0.9):]) / len(l[int(len(l) * 0.9):])
+    
 def get_gpu_memory(nvsmi):
     """
     returns the gpu memory usage
@@ -352,6 +358,11 @@ def log_args(log_writer, args):
         arglog += f"{arg}={value}, "
     log_writer.add_text("config", arglog)
 
+def shrink_and_perturb(model, _lambda=0.5, sigma=0.01):
+        for name, param in model.named_parameters():
+            if 'weight' in name: 
+                param.data *= _lambda
+                param.data += torch.normal(0.0, sigma, size=param.shape).to(model.device)
 
 def main(args):
     """
@@ -447,7 +458,11 @@ def main(args):
             vae = pipe.vae
             unet = pipe.unet
             del pipe
-
+        if args.squeeze_lambda is not None:
+            logging.info(f" * Squeezing model with lambda={args.squeeze_lambda} and sigma={args.squeeze_sigma}")
+            shrink_and_perturb(unet, args.squeeze_lambda, args.squeeze_sigma)
+            shrink_and_perturb(text_encoder, args.squeeze_lambda, args.squeeze_sigma)
+        
         reference_scheduler = DDIMScheduler.from_pretrained(model_root_folder, subfolder="scheduler")
         noise_scheduler = DDPMScheduler.from_pretrained(model_root_folder, subfolder="scheduler")
         tokenizer = CLIPTokenizer.from_pretrained(model_root_folder, subfolder="tokenizer", use_fast=False)
@@ -456,7 +471,7 @@ def main(args):
         traceback.print_exc()
         logging.error(" * Failed to load checkpoint *")
         raise
-
+    
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
         text_encoder.gradient_checkpointing_enable()
@@ -572,6 +587,8 @@ def main(args):
     global interrupted
     interrupted = False
 
+    logging.info("Done")
+    
     def sigterm_handler(signum, frame):
         """
         handles sigterm
@@ -600,6 +617,7 @@ def main(args):
     if not os.path.exists(f"{log_folder}/samples/"):
         os.makedirs(f"{log_folder}/samples/")
 
+    logging.info("Shrinking/perturbing by }")
     if gpu is not None:
         gpu_used_mem, gpu_total_mem = gpu.get_gpu_memory()
         logging.info(f" Pretraining GPU Memory: {gpu_used_mem} / {gpu_total_mem} MB")
@@ -708,7 +726,6 @@ def main(args):
     if validator:
         validator.do_validation(global_step=0,
                                 get_model_prediction_and_target_callable=get_model_prediction_and_target)
-
     # the sample generator might be configured to generate samples before step 0
     if sample_generator.generate_pretrain_samples:
         _, batch = next(enumerate(train_dataloader))
@@ -758,7 +775,7 @@ def main(args):
                 loss_epoch.append(loss_step)
 
                 if (global_step + 1) % args.log_step == 0:
-                    loss_local = sum(loss_log_step) / len(loss_log_step)
+                    loss_local = ave(loss_log_step)
                     lr_unet = ed_optimizer.get_unet_lr()
                     lr_textenc = ed_optimizer.get_textenc_lr()
                     loss_log_step = []
@@ -799,6 +816,9 @@ def main(args):
 
                 del batch
                 global_step += 1
+                if math.isnan(loss_local):
+                    logging.error("Exiting due to loss being NaN...")
+                    sys.exit(0)
                 # end of step
 
             steps_pbar.close()
@@ -893,6 +913,8 @@ if __name__ == "__main__":
     argparser.add_argument("--save_optimizer", action="store_true", default=False, help="saves optimizer state with ckpt, useful for resuming training later")
     argparser.add_argument("--seed", type=int, default=555, help="seed used for samples and shuffling, use -1 for random")
     argparser.add_argument("--shuffle_tags", action="store_true", default=False, help="randomly shuffles CSV tags in captions, for booru datasets")
+    argparser.add_argument("--squeeze_lambda", type=float, default=None, help="Squeeze loss lambda, (def: do not perform squeezing)")
+    argparser.add_argument("--squeeze_sigma", type=float, default=None, help="Squeeze loss sigma, (def: do not perform squeezing)")
     argparser.add_argument("--useadam8bit", action="store_true", default=False, help="deprecated, use --optimizer_config and optimizer.json instead")
     argparser.add_argument("--wandb", action="store_true", default=False, help="enable wandb logging instead of tensorboard, requires env var WANDB_API_KEY")
     argparser.add_argument("--validation_config", default=None, help="Path to a JSON configuration file for the validator.  Default is no validation.")
