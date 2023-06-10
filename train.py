@@ -456,17 +456,9 @@ def main(args):
             unet = pipe.unet
             del pipe
         
-        if args.zero_frequency_noise_ratio == -1.0:
-            # use zero terminal SNR, currently backdoor way to enable it by setting ZFN to -1, still in testing
-            from utils.unet_utils import enforce_zero_terminal_snr
-            temp_scheduler = DDIMScheduler.from_pretrained(model_root_folder, subfolder="scheduler")
-            trained_betas = enforce_zero_terminal_snr(temp_scheduler.betas).numpy().tolist()
-            reference_scheduler = DDIMScheduler.from_pretrained(model_root_folder, subfolder="scheduler", trained_betas=trained_betas)
-            noise_scheduler = DDPMScheduler.from_pretrained(model_root_folder, subfolder="scheduler", trained_betas=trained_betas)
-        else:
-            reference_scheduler = DDIMScheduler.from_pretrained(model_root_folder, subfolder="scheduler")
-            noise_scheduler = DDPMScheduler.from_pretrained(model_root_folder, subfolder="scheduler")
-
+        # use zero terminal SNR, currently backdoor way to enable it by setting ZFN to -1, still in testing
+        reference_scheduler = DDIMScheduler.from_pretrained(model_root_folder, subfolder="scheduler", rescale_betas_zero_snr=True, timestep_scaling="trailing", prediction_type="v_prediction")
+        noise_scheduler = DDPMScheduler.from_pretrained(model_root_folder, subfolder="scheduler", trained_betas=reference_scheduler.betas.numpy().tolist(), prediction_type="v_prediction")
         tokenizer = CLIPTokenizer.from_pretrained(model_root_folder, subfolder="tokenizer", use_fast=False)
 
     except Exception as e:
@@ -696,12 +688,12 @@ def main(args):
 
         noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
-        if noise_scheduler.config.prediction_type == "epsilon":
-            target = noise
-        elif noise_scheduler.config.prediction_type in ["v_prediction", "v-prediction"]:
-            target = noise_scheduler.get_velocity(latents, noise, timesteps)
-        else:
-            raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+#        if noise_scheduler.config.prediction_type == "epsilon":
+#            target = noise
+#        elif noise_scheduler.config.prediction_type in ["v_prediction", "v-prediction"]:
+        target = noise_scheduler.get_velocity(latents, noise, timesteps)
+        #else:
+        #    raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
         del noise, latents, cuda_caption
 
         with autocast(enabled=args.amp):
