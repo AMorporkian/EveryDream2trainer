@@ -228,6 +228,7 @@ class SampleGenerator:
                                   generator=generators,
                                   width=size[0],
                                   height=size[1],
+                                  guidance_rescale=0.7
                                   ).images
 
                     for image in images:
