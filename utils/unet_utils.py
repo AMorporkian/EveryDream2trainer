@@ -65,12 +65,9 @@ def get_attn_yaml(ckpt_path):
         yaml = "v2-inference-v.yaml"
     elif prediction_type == "epsilon" and not is_sd1attn:
         yaml = "v2-inference.yaml"
-    elif prediction_type == "epsilon" and is_sd1attn:
-        yaml = "v1-inference.yaml"
     else:
         yaml = "v1-inference.yaml"
-        raise ValueError(f"Unknown model format for: {prediction_type} and attention_head_dim {unet_cfg['attention_head_dim']}")
-
+        print("Overriding and using v1-inference.yaml with v_prediction")
     logging.info(f"Inferred yaml: {yaml}, attn: {'sd1' if is_sd1attn else 'sd2'}, prediction_type: {prediction_type}")
 
     return is_sd1attn, yaml
