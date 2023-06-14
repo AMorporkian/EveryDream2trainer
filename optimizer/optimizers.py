@@ -60,13 +60,9 @@ class EveryDreamOptimizer():
         self.text_encoder_params = self._apply_text_encoder_freeze(text_encoder)
         self.unet_params = unet.parameters()
 
-        self.optimizers = []
-        self.optimizer_te, self.optimizer_unet = self.create_optimizers(args,
-                                                                        self.text_encoder_params,
-                                                                        self.unet_params)
-        self.optimizers.append(self.optimizer_te) if self.optimizer_te is not None else None
-        self.optimizers.append(self.optimizer_unet) if self.optimizer_unet is not None else None
-
+        
+        self.optimizer_te = self.optimizer_unet =  self._create_optimizer("combined", args, self.base_config, list(self.text_encoder_params) + list(self.unet_params))        
+        self.optimizers = [self.optimizer_te]
         self.lr_schedulers = []
         schedulers = self.create_lr_schedulers(args, optimizer_config)
         self.lr_schedulers.extend(schedulers)
@@ -135,23 +131,6 @@ class EveryDreamOptimizer():
             self._load_optimizer(self.optimizer_te, te_optimizer_state_path)
         if os.path.exists(unet_optimizer_state_path) and self.optimizer_unet is not None:
             self._load_optimizer(self.optimizer_unet, unet_optimizer_state_path)
-
-    def create_optimizers(self, args, text_encoder_params, unet_params):
-        """
-        creates optimizers from config and args for unet and text encoder
-        returns (optimizer_te, optimizer_unet)
-        """
-
-        if args.disable_textenc_training:
-            optimizer_te = None
-        else:
-            optimizer_te = self._create_optimizer("text encoder", args, self.te_config, text_encoder_params)
-        if args.disable_unet_training:
-            optimizer_unet = None
-        else:
-            optimizer_unet = self._create_optimizer("unet", args, self.base_config, unet_params)
-
-        return optimizer_te, optimizer_unet
 
     def get_final_optimizer_configs(self, args, global_optimizer_config):
         """
