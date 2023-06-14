@@ -225,6 +225,7 @@ class SampleGenerator:
                                   num_inference_steps=self.num_inference_steps,
                                   num_images_per_prompt=1,
                                   guidance_scale=cfg,
+                                  guidance_rescale=0.7,
                                   generator=generators,
                                   width=size[0],
                                   height=size[1],
@@ -244,6 +245,17 @@ class SampleGenerator:
                         draw.rectangle((x, y, image.width, image.height), fill="white")
                         draw.text((x, y), print_msg, fill="black", font=font)
 
+                        # Add prompt to the top of the image
+                        prompt_text = batch[prompts.index(prompt)].prompt
+                        prompt_font = ImageFont.truetype(font="arial.ttf", size=30)
+                        prompt_width, prompt_height = prompt_font.getsize(prompt_text)
+                        prompt_image = Image.new('RGB', (image.width, prompt_height), color=(255, 255, 255))
+                        prompt_draw = ImageDraw.Draw(prompt_image)
+                        prompt_draw.text((0, 0), prompt_text, font=prompt_font, fill=(0, 0, 0))
+                        image = Image.new('RGB', (image.width, image.height + prompt_height), color=(255, 255, 255))
+                        image.paste(prompt_image, (0, 0))
+                        image.paste(image, (0, prompt_height))
+
                     batch_images.append(images)
                     del images
 
@@ -251,7 +263,7 @@ class SampleGenerator:
                 #print("batch_images:", batch_images)
 
                 width = size[0] * len(self.cfgs)
-                height = size[1]
+                height = size[1] + prompt_height
 
                 for prompt_idx in range(len(batch)):
                     #print(f"batch_images[:][{prompt_idx}]: {batch_images[:][prompt_idx]}")
@@ -260,9 +272,37 @@ class SampleGenerator:
 
                     for cfg_idx in range(len(self.cfgs)):
                         image = batch_images[cfg_idx][prompt_idx]
-                        result.paste(image, (x_offset, 0))
+                        result.paste(image, (x_offset, prompt_height))
                         x_offset += image.width
 
+                    # Add prompt to the top of the image
+                    prompt_text = batch[prompt_idx].prompt
+                    prompt_font = ImageFont.truetype(font="arial.ttf", size=30)
+                    prompt_width, prompt_height = prompt_font.getsize(prompt_text)
+                    prompt_image = Image.new('RGB', (result.width, prompt_height), color=(255, 255, 255))
+                    prompt_draw = ImageDraw.Draw(prompt_image)
+                    prompt_draw.text((0, 0), prompt_text, font=prompt_font, fill=(0, 0, 0))
+                    result.paste(prompt_image, (0, 0))
+
+                    # Save the image and write the sample request to a text file
+                    clean_prompt = clean_filename(prompt_text)
+                    result.save(f"{self.log_folder}/samples/gs{global_step:05}-{sample_index}-{clean_prompt[:100]}.jpg", format="JPEG", quality=95, optimize=True, progressive=False)
+                    with open(f"{self.log_folder}/samples/gs{global_step:05}-{sample_index}-{clean_prompt[:100]}.txt", "w", encoding='utf-8') as f:
+                        f.write(str(batch[prompt_idx]))
+
+                    tfimage = transforms.ToTensor()(result)
+                    if batch[prompt_idx].wants_random_caption:
+                        self.log_writer.add_image(tag=f"sample_{sample_index}", img_tensor=tfimage, global_step=global_step)
+                    else:
+                        self.log_writer.add_image(tag=f"sample_{sample_index}_{clean_prompt[:100]}", img_tensor=tfimage, global_step=global_step)
+                    sample_index += 1
+
+                    del result
+                    del tfimage
+                del batch_images
+
+                pbar.update(1)
+                    
                     prompt = prompts[prompt_idx]
                     clean_prompt = clean_filename(prompt)
 
