@@ -29,11 +29,13 @@ from torchvision import transforms
 
 OptionalImageCaption = typing.Optional['ImageCaption']
 
+
+    
 class ImageCaption:
     """
     Represents the various parts of an image caption
     """
-    def __init__(self, main_prompt: str, rating: float, tags: list[str], tag_weights: list[float], max_target_length: int, use_weights: bool):
+    def __init__(self, main_prompt: str, rating: float=1.0, tags: list[str]=[], tag_weights: list[float]=[], max_target_length: int=2048, use_weights: bool=False):
         """
         :param main_prompt: The part of the caption which should always be included
         :param tags: list of tags to pick from to fill the caption
@@ -148,18 +150,19 @@ class ImageTrainItem:
         self.target_wh = None
 
         self.image_size = None
-        if image is None or len(image) == 0:
-            self.image = []
-        else:
-            self.image = image
-            self.image_size = image.size
+        # if not image or len(image) == 0:
+        #     self.image = []
+        # else:
+        self.image = image
+        self.image_size = image.size
             #self.target_size = None
 
         self.is_undersized = False
         self.error = None
-        self.__compute_target_width_height()
+        self.__compute_target_width_height(self.image)
 
     def load_image(self):
+        if self.image: return self.image
         try:
             image = PIL.Image.open(self.pathname).convert('RGB')
             image = self._try_transpose(image, print_error=False)
@@ -308,23 +311,14 @@ class ImageTrainItem:
         
         return self
 
-    def __compute_target_width_height(self):
-        self.target_wh = None
-        try:
-            with PIL.Image.open(self.pathname) as image:
-                if self._needs_transpose(image):
-                    height, width = image.size
-                else:
-                    width, height = image.size
-                image_aspect = width / height
-                target_wh = min(self.aspects, key=lambda aspects:abs(aspects[0]/aspects[1] - image_aspect))
-
-                self.is_undersized = (width * height) < (target_wh[0]*1.02 * target_wh[1]*1.02)
-                self.target_wh = target_wh
-        except Exception as e:
-            self.error = e
-
-    @staticmethod
+    def __compute_target_width_height(self, image):
+        if image is None:
+            image = self.load_image()
+        width, height = image.size
+        image_aspect = width / height
+        self.target_wh = min(self.aspects, key=lambda aspect: abs(aspect[0] / aspect[1] - image_aspect))
+        return self.target_wh
+    
     def __autocrop(image: PIL.Image, q=.404):
         """
         crops image to a random square inside small axis using a truncated gaussian distribution across the long axis

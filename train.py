@@ -55,7 +55,7 @@ from data.data_loader import DataLoaderMultiAspect
 
 from data.every_dream import EveryDreamBatch, build_torch_dataloader
 from data.every_dream_validation import EveryDreamValidator
-from data.image_train_item import ImageTrainItem, DEFAULT_BATCH_ID
+from data.image_train_item import ImageCaption, ImageTrainItem, DEFAULT_BATCH_ID
 from utils.huggingface_downloader import try_download_model_from_hf
 from utils.convert_diff_to_ckpt import convert as converter
 from utils.isolate_rng import isolate_rng
@@ -275,7 +275,7 @@ def setup_args(args):
 
 
 def report_image_train_item_problems(log_folder: str, items: list[ImageTrainItem], batch_size) -> None:
-    undersized_items = [item for item in items if item.is_undersized]
+    undersized_items = []#[item for item in items if item.is_undersized]
     if len(undersized_items) > 0:
         underized_log_path = os.path.join(log_folder, "undersized_images.txt")
         logging.warning(f"{Fore.LIGHTRED_EX} ** Some images are smaller than the target size, consider using larger images{Style.RESET_ALL}")
@@ -533,9 +533,10 @@ def main(args):
                                flush_secs=20,
                                comment=args.run_name if args.run_name is not None else log_time,
                               )
-
-    image_train_items = resolve_image_train_items(args)
-
+    from datasets import load_dataset, Image
+    dataset = load_dataset("ShoukanLabs/OpenNiji-Dataset", split="train", streaming=True).cast_column("url", Image()).rename_columns({"url": "image", "prompt": "tags"})
+    dataset = list(dataset.take(50))
+    image_train_items = [ImageTrainItem(x["image"], ImageCaption(x["tags"]), aspects=args.aspects, pathname="") for x in dataset]
     validator = None
     if args.validation_config is not None:
         validator = EveryDreamValidator(args.validation_config,
@@ -909,7 +910,7 @@ if __name__ == "__main__":
     argparser.add_argument("--optimizer_config", default="optimizer.json", help="Path to a JSON configuration file for the optimizer.  Default is 'optimizer.json'")
     argparser.add_argument("--project_name", type=str, default="myproj", help="Project name for logs and checkpoints, ex. 'tedbennett', 'superduperV1'")
     argparser.add_argument("--resolution", type=int, default=512, help="resolution to train", choices=supported_resolutions)
-    argparser.add_argument("--resume_ckpt", type=str, required=not ('resume_ckpt' in args), default="sd_v1-5_vae.ckpt", help="The checkpoint to resume from, either a local .ckpt file, a converted Diffusers format folder, or a Huggingface.co repo id such as stabilityai/stable-diffusion-2-1 ")
+    argparser.add_argument("--resume_ckpt", type=str, required=False, default="sd_v1-5_vae.ckpt", help="The checkpoint to resume from, either a local .ckpt file, a converted Diffusers format folder, or a Huggingface.co repo id such as stabilityai/stable-diffusion-2-1 ")
     argparser.add_argument("--run_name", type=str, required=False, default=None, help="Run name for wandb (child of project name), and comment for tensorboard, (def: None)")
     argparser.add_argument("--sample_prompts", type=str, default="sample_prompts.txt", help="Text file with prompts to generate test samples from, or JSON file with sample generator settings (default: sample_prompts.txt)")
     argparser.add_argument("--sample_steps", type=int, default=250, help="Number of steps between samples (def: 250)")
@@ -930,5 +931,6 @@ if __name__ == "__main__":
 
     # load CLI args to overwrite existing config args
     args = argparser.parse_args(args=argv, namespace=args)
-    
+    args.resume_ckpt = "Panopstor/EveryDream"
+    args.config = "./train.json"    
     main(args)
