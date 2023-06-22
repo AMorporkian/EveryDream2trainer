@@ -458,7 +458,7 @@ def main(args):
             unet = pipe.unet
             del pipe
         
-        _args = {"subfolder": "scheduler", "rescale_betas_zero_snr": args.enable_zero_terminal_snr, "timestep_spacing": "trailing" if args.enable_trailing_timesteps else "leading", "prediction_type": "v_prediction" if args.v_prediction else None} 
+        _args = {"subfolder": "scheduler", "rescale_betas_zero_snr": args.enable_zero_terminal_snr, "timestep_spacing": "trailing" if args.enable_trailing_timesteps else "leading", "prediction_type": "v_prediction" if args.v_prediction else "epsilon"} 
         reference_scheduler = DDIMScheduler.from_pretrained(model_root_folder, **_args)
         noise_scheduler = DDPMScheduler.from_pretrained(model_root_folder, subfolder="scheduler", trained_betas=reference_scheduler.betas.detach().clone())
 
