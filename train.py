@@ -21,7 +21,6 @@ import math
 import signal
 import argparse
 import logging
-import threading
 import time
 import gc
 import random
@@ -33,16 +32,13 @@ from torch.cuda.amp import autocast
 
 from colorama import Fore, Style
 import numpy as np
-import itertools
 import torch
 import datetime
 import json
 from tqdm.auto import tqdm
 
-from diffusers import StableDiffusionPipeline, AutoencoderKL, UNet2DConditionModel, DDIMScheduler, DDPMScheduler, \
-    DPMSolverMultistepScheduler
+from diffusers import StableDiffusionPipeline, AutoencoderKL, UNet2DConditionModel, DDIMScheduler, DDPMScheduler
 #from diffusers.models import AttentionBlock
-from diffusers.optimization import get_scheduler
 from diffusers.utils.import_utils import is_xformers_available
 from transformers import CLIPTextModel, CLIPTokenizer
 #from accelerate import Accelerator
@@ -356,244 +352,51 @@ def log_args(log_writer, args):
         arglog += f"{arg}={value}, "
     log_writer.add_text("config", arglog)
 
-
-def main(args):
+@torch.no_grad()
+def __save_model(save_path, unet, text_encoder, tokenizer, scheduler, vae, ed_optimizer, save_ckpt_dir, yaml_name,
+                    save_full_precision=False, save_optimizer_flag=False, save_ckpt=True):
     """
-    Main entry point
+    Save the model to disk
     """
-    if os.name == 'nt':
-        print(" * Windows detected, disabling Triton")
-        os.environ['XFORMERS_FORCE_DISABLE_TRITON'] = "1"
-
-    log_time = setup_local_logger(args)
-    args = setup_args(args)
-    print(f" Args:")
-    pprint.pprint(vars(args))
-
-    if args.seed == -1:
-        args.seed = random.randint(0, 2**30)
-    seed = args.seed
-    logging.info(f" Seed: {seed}")
-    set_seed(seed)
-    if torch.cuda.is_available():
-        device = torch.device(f"cuda:{args.gpuid}")
-        gpu = GPU(device)
-        torch.backends.cudnn.benchmark = True
-    else:
-        logging.warning("*** Running on CPU. This is for testing loading/config parsing code only.")
-        device = 'cpu'
-        gpu = None
-
-    log_folder = os.path.join(args.logdir, f"{args.project_name}_{log_time}")
-
-    if not os.path.exists(log_folder):
-        os.makedirs(log_folder)
-
-    @torch.no_grad()
-    def __save_model(save_path, unet, text_encoder, tokenizer, scheduler, vae, ed_optimizer, save_ckpt_dir, yaml_name,
-                     save_full_precision=False, save_optimizer_flag=False, save_ckpt=True):
-        """
-        Save the model to disk
-        """
-        global global_step
-        if global_step is None or global_step == 0:
-            logging.warning("  No model to save, something likely blew up on startup, not saving")
-            return
-        logging.info(f" * Saving diffusers model to {save_path}")
-        pipeline = StableDiffusionPipeline(
-            vae=vae,
-            text_encoder=text_encoder,
-            tokenizer=tokenizer,
-            unet=unet,
-            scheduler=scheduler,
-            safety_checker=None, # save vram
-            requires_safety_checker=None, # avoid nag
-            feature_extractor=None, # must be none of no safety checker
-        )
-        pipeline.save_pretrained(save_path)
-        sd_ckpt_path = f"{os.path.basename(save_path)}.ckpt"
-
-        if save_ckpt:
-            if save_ckpt_dir is not None:
-                sd_ckpt_full = os.path.join(save_ckpt_dir, sd_ckpt_path)
-            else:
-                sd_ckpt_full = os.path.join(os.curdir, sd_ckpt_path)
-                save_ckpt_dir = os.curdir
-
-            half = not save_full_precision
-
-            logging.info(f" * Saving SD model to {sd_ckpt_full}")
-            converter(model_path=save_path, checkpoint_path=sd_ckpt_full, half=half)
-
-            if yaml_name and yaml_name != "v1-inference.yaml":
-                yaml_save_path = f"{os.path.join(save_ckpt_dir, os.path.basename(save_path))}.yaml"
-                logging.info(f" * Saving yaml to {yaml_save_path}")
-                shutil.copyfile(yaml_name, yaml_save_path)
-
-        if save_optimizer_flag:
-            logging.info(f" Saving optimizer state to {save_path}")
-            ed_optimizer.save(save_path)
-
-    optimizer_state_path = None
-    try:
-        # check for a local file
-        hf_cache_path = get_hf_ckpt_cache_path(args.resume_ckpt)
-        if os.path.exists(hf_cache_path) or os.path.exists(args.resume_ckpt):
-            model_root_folder, is_sd1attn, yaml = convert_to_hf(args.resume_ckpt)
-            text_encoder = CLIPTextModel.from_pretrained(model_root_folder, subfolder="text_encoder")
-            vae = AutoencoderKL.from_pretrained(model_root_folder, subfolder="vae")
-            unet = UNet2DConditionModel.from_pretrained(model_root_folder, subfolder="unet")
-
-            optimizer_state_path = os.path.join(args.resume_ckpt, "optimizer.pt")
-            if not os.path.exists(optimizer_state_path):
-                optimizer_state_path = None
-        else:
-            # try to download from HF using resume_ckpt as a repo id
-            downloaded = try_download_model_from_hf(repo_id=args.resume_ckpt)
-            if downloaded is None:
-                raise ValueError(f"No local file/folder for {args.resume_ckpt}, and no matching huggingface.co repo could be downloaded")
-            pipe, model_root_folder, is_sd1attn, yaml = downloaded
-            text_encoder = pipe.text_encoder
-            vae = pipe.vae
-            unet = pipe.unet
-            del pipe
-        
-        _args = {"subfolder": "scheduler", "rescale_betas_zero_snr": args.enable_zero_terminal_snr, "timestep_spacing": "trailing" if args.enable_trailing_timesteps else "leading", "prediction_type": "v_prediction" if args.v_prediction else None} 
-        reference_scheduler = DDIMScheduler.from_pretrained(model_root_folder, **_args)
-        noise_scheduler = DDPMScheduler.from_pretrained(model_root_folder, subfolder="scheduler", trained_betas=reference_scheduler.betas.detach().clone())
-
-        tokenizer = CLIPTokenizer.from_pretrained(model_root_folder, subfolder="tokenizer", use_fast=False)
-
-    except Exception as e:
-        traceback.print_exc()
-        logging.error(" * Failed to load checkpoint *")
-        raise
-
-    if args.gradient_checkpointing:
-        unet.enable_gradient_checkpointing()
-        text_encoder.gradient_checkpointing_enable()
-
-    if not args.disable_xformers:
-        if (args.amp and is_sd1attn) or (not is_sd1attn):
-            try:
-                unet.enable_xformers_memory_efficient_attention()
-                logging.info("Enabled xformers")
-            except Exception as ex:
-                logging.warning("failed to load xformers, using attention slicing instead")
-                unet.set_attention_slice("auto")
-                pass
-        elif (not args.amp and is_sd1attn):
-            logging.info("AMP is disabled but model is SD1.X, using attention slicing instead of xformers")
-            unet.set_attention_slice("auto")
-    else:
-        logging.info("xformers disabled via arg, using attention slicing instead")
-        unet.set_attention_slice("auto")
-
-    vae = vae.to(device, dtype=torch.float16 if args.amp else torch.float32)
-    unet = unet.to(device, dtype=torch.float32)
-    if args.disable_textenc_training and args.amp:
-        text_encoder = text_encoder.to(device, dtype=torch.float16)
-    else:
-        text_encoder = text_encoder.to(device, dtype=torch.float32)
-
-    try:
-        torch.compile(unet)
-        torch.compile(text_encoder)
-        torch.compile(vae)
-        logging.info("Successfully compiled models")
-    except Exception as ex:
-        logging.warning(f"Failed to compile model, continuing anyway, ex: {ex}")
-        pass
-
-    optimizer_config = None
-    optimizer_config_path = args.optimizer_config if args.optimizer_config else "optimizer.json"
-    if os.path.exists(os.path.join(os.curdir, optimizer_config_path)):
-        with open(os.path.join(os.curdir, optimizer_config_path), "r") as f:
-            optimizer_config = json.load(f)
-
-    if args.wandb:
-        wandb.tensorboard.patch(root_logdir=log_folder, pytorch=False, tensorboard_x=False, save=False)
-        wandb_run = wandb.init(
-            project=args.project_name,
-            config={"main_cfg": vars(args), "optimizer_cfg": optimizer_config},
-            name=args.run_name,
-            )
-        try:
-            if webbrowser.get():
-                webbrowser.open(wandb_run.url, new=2)
-        except Exception:
-            pass
-
-    log_writer = SummaryWriter(log_dir=log_folder,
-                               flush_secs=20,
-                               comment=args.run_name if args.run_name is not None else log_time,
-                              )
-
-    image_train_items = resolve_image_train_items(args)
-
-    validator = None
-    if args.validation_config is not None:
-        validator = EveryDreamValidator(args.validation_config,
-                                        default_batch_size=args.batch_size,
-                                        resolution=args.resolution,
-                                        log_writer=log_writer,
-                                        )
-        # the validation dataset may need to steal some items from image_train_items
-        image_train_items = validator.prepare_validation_splits(image_train_items, tokenizer=tokenizer)
-
-    report_image_train_item_problems(log_folder, image_train_items, batch_size=args.batch_size)
-
-    data_loader = DataLoaderMultiAspect(
-        image_train_items=image_train_items,
-        seed=seed,
-        batch_size=args.batch_size,
-        grad_accum=args.grad_accum
-    )
-
-    train_batch = EveryDreamBatch(
-        data_loader=data_loader,
-        debug_level=1,
-        conditional_dropout=args.cond_dropout,
+    global global_step
+    if global_step is None or global_step == 0:
+        logging.warning("  No model to save, something likely blew up on startup, not saving")
+        return
+    logging.info(f" * Saving diffusers model to {save_path}")
+    pipeline = StableDiffusionPipeline(
+        vae=vae,
+        text_encoder=text_encoder,
         tokenizer=tokenizer,
-        seed = seed,
-        shuffle_tags=args.shuffle_tags,
-        rated_dataset=args.rated_dataset,
-        rated_dataset_dropout_target=(1.0 - (args.rated_dataset_target_dropout_percent / 100.0))
+        unet=unet,
+        scheduler=scheduler,
+        safety_checker=None, # save vram
+        requires_safety_checker=None, # avoid nag
+        feature_extractor=None, # must be none of no safety checker
     )
+    pipeline.save_pretrained(save_path)
+    sd_ckpt_path = f"{os.path.basename(save_path)}.ckpt"
 
-    torch.cuda.benchmark = False
+    if save_ckpt:
+        if save_ckpt_dir is not None:
+            sd_ckpt_full = os.path.join(save_ckpt_dir, sd_ckpt_path)
+        else:
+            sd_ckpt_full = os.path.join(os.curdir, sd_ckpt_path)
+            save_ckpt_dir = os.curdir
 
-    epoch_len = math.ceil(len(train_batch) / args.batch_size)
+        half = not save_full_precision
 
-    ed_optimizer = EveryDreamOptimizer(args,
-                                       optimizer_config,
-                                       text_encoder,
-                                       unet,
-                                       epoch_len)
+        logging.info(f" * Saving SD model to {sd_ckpt_full}")
+        converter(model_path=save_path, checkpoint_path=sd_ckpt_full, half=half)
 
-    log_args(log_writer, args)
+        if yaml_name and yaml_name != "v1-inference.yaml":
+            yaml_save_path = f"{os.path.join(save_ckpt_dir, os.path.basename(save_path))}.yaml"
+            logging.info(f" * Saving yaml to {yaml_save_path}")
+            shutil.copyfile(yaml_name, yaml_save_path)
 
-    sample_generator = SampleGenerator(log_folder=log_folder, log_writer=log_writer,
-                                       default_resolution=args.resolution, default_seed=args.seed,
-                                       config_file_path=args.sample_prompts,
-                                       batch_size=max(1,args.batch_size//2),
-                                       default_sample_steps=args.sample_steps,
-                                       use_xformers=is_xformers_available() and not args.disable_xformers,
-                                       use_penultimate_clip_layer=(args.clip_skip >= 2)
-                                       )
-
-    """
-    Train the model
-
-    """
-    print(f" {Fore.LIGHTGREEN_EX}** Welcome to EveryDream trainer 2.0!**{Style.RESET_ALL}")
-    print(f" (C) 2022-2023 Victor C Hall  This program is licensed under AGPL 3.0 https://www.gnu.org/licenses/agpl-3.0.en.html")
-    print()
-    print("** Trainer Starting **")
-
-    global interrupted
-    interrupted = False
-
+    if save_optimizer_flag:
+        logging.info(f" Saving optimizer state to {save_path}")
+        ed_optimizer.save(save_path)
+def create_sigterm_handler(log_folder, unet, text_encoder, tokenizer, noise_scheduler, vae, ed_optimizer, args):
     def sigterm_handler(signum, frame):
         """
         handles sigterm
@@ -616,253 +419,539 @@ def main(args):
         else:
             # non-main threads (i.e. dataloader workers) should exit cleanly
             exit(0)
-
-    signal.signal(signal.SIGINT, sigterm_handler)
-
-    if not os.path.exists(f"{log_folder}/samples/"):
-        os.makedirs(f"{log_folder}/samples/")
-
-    if gpu is not None:
-        gpu_used_mem, gpu_total_mem = gpu.get_gpu_memory()
-        logging.info(f" Pretraining GPU Memory: {gpu_used_mem} / {gpu_total_mem} MB")
-    logging.info(f" saving ckpts every {args.ckpt_every_n_minutes} minutes")
-    logging.info(f" saving ckpts every {args.save_every_n_epochs } epochs")
-
-    train_dataloader = build_torch_dataloader(train_batch, batch_size=args.batch_size)
-
-    unet.train() if not args.disable_unet_training else unet.eval()
-    text_encoder.train() if not args.disable_textenc_training else text_encoder.eval()
-
-    logging.info(f" unet device: {unet.device}, precision: {unet.dtype}, training: {unet.training}")
-    logging.info(f" text_encoder device: {text_encoder.device}, precision: {text_encoder.dtype}, training: {text_encoder.training}")
-    logging.info(f" vae device: {vae.device}, precision: {vae.dtype}, training: {vae.training}")
-    logging.info(f" scheduler: {noise_scheduler.__class__}")
-
-    logging.info(f" {Fore.GREEN}Project name: {Style.RESET_ALL}{Fore.LIGHTGREEN_EX}{args.project_name}{Style.RESET_ALL}")
-    logging.info(f" {Fore.GREEN}grad_accum: {Style.RESET_ALL}{Fore.LIGHTGREEN_EX}{args.grad_accum}{Style.RESET_ALL}"),
-    logging.info(f" {Fore.GREEN}batch_size: {Style.RESET_ALL}{Fore.LIGHTGREEN_EX}{args.batch_size}{Style.RESET_ALL}")
-    logging.info(f" {Fore.GREEN}epoch_len: {Fore.LIGHTGREEN_EX}{epoch_len}{Style.RESET_ALL}")
-
-    epoch_pbar = tqdm(range(args.max_epochs), position=0, leave=True, dynamic_ncols=True)
-    epoch_pbar.set_description(f"{Fore.LIGHTCYAN_EX}Epochs{Style.RESET_ALL}")
-    epoch_times = []
-
-    global global_step
-    global_step = 0
-    training_start_time = time.time()
-    last_epoch_saved_time = training_start_time
-
-    append_epoch_log(global_step=global_step, epoch_pbar=epoch_pbar, gpu=gpu, log_writer=log_writer)
-
-    loss_log_step = []
-
-    assert len(train_batch) > 0, "train_batch is empty, check that your data_root is correct"
-
-    # actual prediction function - shared between train and validate
-    def get_model_prediction_and_target(image, tokens, zero_frequency_noise_ratio=0.0):
-        with torch.no_grad():
-            with autocast(enabled=args.amp):
-                pixel_values = image.to(memory_format=torch.contiguous_format).to(unet.device)
-                latents = vae.encode(pixel_values, return_dict=False)
-            del pixel_values
-            latents = latents[0].sample() * 0.18215
-
-            if zero_frequency_noise_ratio > 0.0:
-                # see https://www.crosslabs.org//blog/diffusion-with-offset-noise
-                zero_frequency_noise = zero_frequency_noise_ratio * torch.randn(latents.shape[0], latents.shape[1], 1, 1, device=latents.device)
-                noise = torch.randn_like(latents) + zero_frequency_noise
-            else:
-                noise = torch.randn_like(latents)
-
-            bsz = latents.shape[0]
-
-            timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
-            timesteps = timesteps.long()
-
-            cuda_caption = tokens.to(text_encoder.device)
-
-        encoder_hidden_states = text_encoder(cuda_caption, output_hidden_states=True)
-
-        if args.clip_skip > 0:
-            encoder_hidden_states = text_encoder.text_model.final_layer_norm(
-                encoder_hidden_states.hidden_states[-args.clip_skip])
-        else:
-            encoder_hidden_states = encoder_hidden_states.last_hidden_state
-
-        noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-
-        if noise_scheduler.config.prediction_type == "epsilon":
-            target = noise
-        elif noise_scheduler.config.prediction_type in ["v_prediction", "v-prediction"]:
-            target = noise_scheduler.get_velocity(latents, noise, timesteps)
-        else:
-            raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
-        del noise, latents, cuda_caption
-
+def get_model_prediction_and_target(image, tokens, vae, text_encoder, noise_scheduler, unet, zero_frequency_noise_ratio=0.0):
+    with torch.no_grad():
         with autocast(enabled=args.amp):
-            #print(f"types: {type(noisy_latents)} {type(timesteps)} {type(encoder_hidden_states)}")
-            model_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
+            pixel_values = image.to(memory_format=torch.contiguous_format).to(unet.device)
+            latents = vae.encode(pixel_values, return_dict=False)
+        del pixel_values
+        latents = latents[0].sample() * 0.18215
 
-        return model_pred, target
+        if zero_frequency_noise_ratio > 0.0:
+            # see https://www.crosslabs.org//blog/diffusion-with-offset-noise
+            zero_frequency_noise = zero_frequency_noise_ratio * torch.randn(latents.shape[0], latents.shape[1], 1, 1, device=latents.device)
+            noise = torch.randn_like(latents) + zero_frequency_noise
+        else:
+            noise = torch.randn_like(latents)
 
-    def generate_samples(global_step: int, batch):
-        with isolate_rng():
-            prev_sample_steps = sample_generator.sample_steps
-            sample_generator.reload_config()
-            if prev_sample_steps != sample_generator.sample_steps:
-                next_sample_step = math.ceil((global_step + 1) / sample_generator.sample_steps) * sample_generator.sample_steps
-                print(f" * SampleGenerator config changed, now generating images samples every " +
-                      f"{sample_generator.sample_steps} training steps (next={next_sample_step})")
-            sample_generator.update_random_captions(batch["captions"])
-            inference_pipe = sample_generator.create_inference_pipe(unet=unet,
-                                                                    text_encoder=text_encoder,
-                                                                    tokenizer=tokenizer,
-                                                                    vae=vae,
-                                                                    diffusers_scheduler_config=reference_scheduler.config
-                                                                    ).to(device)
-            sample_generator.generate_samples(inference_pipe, global_step)
+        bsz = latents.shape[0]
 
-            del inference_pipe
-        gc.collect()
-        torch.cuda.empty_cache()
+        timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
+        timesteps = timesteps.long()
 
-    def make_save_path(epoch, global_step, prepend=""):
-        return os.path.join(f"{log_folder}/ckpts/{prepend}{args.project_name}-ep{epoch:02}-gs{global_step:05}")
+        cuda_caption = tokens.to(text_encoder.device)
 
-    # Pre-train validation to establish a starting point on the loss graph
-    if validator:
-        validator.do_validation(global_step=0,
-                                get_model_prediction_and_target_callable=get_model_prediction_and_target)
+    encoder_hidden_states = text_encoder(cuda_caption, output_hidden_states=True)
 
-    # the sample generator might be configured to generate samples before step 0
-    if sample_generator.generate_pretrain_samples:
-        _, batch = next(enumerate(train_dataloader))
-        generate_samples(global_step=0, batch=batch)
+    if args.clip_skip > 0:
+        encoder_hidden_states = text_encoder.text_model.final_layer_norm(
+            encoder_hidden_states.hidden_states[-args.clip_skip])
+    else:
+        encoder_hidden_states = encoder_hidden_states.last_hidden_state
 
-    try:
-        write_batch_schedule(args, log_folder, train_batch, epoch = 0)
+    noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
-        for epoch in range(args.max_epochs):
-            loss_epoch = []
-            epoch_start_time = time.time()
-            images_per_sec_log_step = []
+    if noise_scheduler.config.prediction_type == "epsilon":
+        target = noise
+    elif noise_scheduler.config.prediction_type in ["v_prediction", "v-prediction"]:
+        target = noise_scheduler.get_velocity(latents, noise, timesteps)
+    else:
+        raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+    del noise, latents, cuda_caption
 
-            epoch_len = math.ceil(len(train_batch) / args.batch_size)
-            steps_pbar = tqdm(range(epoch_len), position=1, leave=False, dynamic_ncols=True)
-            steps_pbar.set_description(f"{Fore.LIGHTCYAN_EX}Steps{Style.RESET_ALL}")
+    with autocast(enabled=args.amp):
+        #print(f"types: {type(noisy_latents)} {type(timesteps)} {type(encoder_hidden_states)}")
+        model_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
 
-            validation_steps = (
-                [] if validator is None
-                else validator.get_validation_step_indices(epoch, len(train_dataloader))
-            )
+    return model_pred, target
 
-            for step, batch in enumerate(train_dataloader):
-                step_start_time = time.time()
+def generate_samples(global_step: int, sample_generator, unet, text_encoder, tokenizer, vae, reference_scheduler, device, batch):
+    with isolate_rng():
+        prev_sample_steps = sample_generator.sample_steps
+        sample_generator.reload_config()
+        if prev_sample_steps != sample_generator.sample_steps:
+            next_sample_step = math.ceil((global_step + 1) / sample_generator.sample_steps) * sample_generator.sample_steps
+            print(f" * SampleGenerator config changed, now generating images samples every " +
+                    f"{sample_generator.sample_steps} training steps (next={next_sample_step})")
+        sample_generator.update_random_captions(batch["captions"])
+        inference_pipe = sample_generator.create_inference_pipe(unet=unet,
+                                                                text_encoder=text_encoder,
+                                                                tokenizer=tokenizer,
+                                                                vae=vae,
+                                                                diffusers_scheduler_config=reference_scheduler.config
+                                                                ).to(device)
+        sample_generator.generate_samples(inference_pipe, global_step)
 
-                model_pred, target = get_model_prediction_and_target(batch["image"], batch["tokens"], args.zero_frequency_noise_ratio)
+        del inference_pipe
+    gc.collect()
+    torch.cuda.empty_cache()
 
-                loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+def make_save_path(epoch, global_step, prepend=""):
+    return os.path.join(f"{log_folder}/ckpts/{prepend}{args.project_name}-ep{epoch:02}-gs{global_step:05}")
 
-                del target, model_pred
+def log_epoch(args, log_folder, log_writer, train_batch, epoch_pbar, epoch_times, epoch, loss_epoch, epoch_start_time, steps_pbar):
+    steps_pbar.close()
 
-                if batch["runt_size"] > 0:
-                    loss_scale = batch["runt_size"] / args.batch_size
-                    loss = loss * loss_scale
+    elapsed_epoch_time = (time.time() - epoch_start_time) / 60
+    epoch_times.append(dict(epoch=epoch, time=elapsed_epoch_time))
+    log_writer.add_scalar("performance/minutes per epoch", elapsed_epoch_time, global_step)
 
-                ed_optimizer.step(loss, step, global_step)
+    epoch_pbar.update(1)
+    if epoch < args.max_epochs - 1:
+        train_batch.shuffle(epoch_n=epoch, max_epochs = args.max_epochs)
+        write_batch_schedule(args, log_folder, train_batch, epoch + 1)
 
-                loss_step = loss.detach().item()
+    loss_local = sum(loss_epoch) / len(loss_epoch)
+    log_writer.add_scalar(tag="loss/epoch", scalar_value=loss_local, global_step=global_step)
 
-                steps_pbar.set_postfix({"loss/step": loss_step}, {"gs": global_step})
-                steps_pbar.update(1)
+def complete_training(args, yaml, text_encoder, vae, unet, noise_scheduler, tokenizer, ed_optimizer, epoch_times, training_start_time):
+    epoch = args.max_epochs
+    save_path = make_save_path(epoch, global_step, prepend=("" if args.no_prepend_last else "last-"))
+    __save_model(save_path, unet, text_encoder, tokenizer, noise_scheduler, vae, ed_optimizer, args.save_ckpt_dir, yaml, args.save_full_precision, args.save_optimizer, save_ckpt=not args.no_save_ckpt)
 
-                images_per_sec = args.batch_size / (time.time() - step_start_time)
-                images_per_sec_log_step.append(images_per_sec)
-
-                loss_log_step.append(loss_step)
-                loss_epoch.append(loss_step)
-
-                if (global_step + 1) % args.log_step == 0:
-                    loss_local = sum(loss_log_step) / len(loss_log_step)
-                    lr_unet = ed_optimizer.get_unet_lr()
-                    lr_textenc = ed_optimizer.get_textenc_lr()
-                    loss_log_step = []
-                    
-                    log_writer.add_scalar(tag="hyperparameter/lr unet", scalar_value=lr_unet, global_step=global_step)
-                    log_writer.add_scalar(tag="hyperparameter/lr text encoder", scalar_value=lr_textenc, global_step=global_step)
-                    log_writer.add_scalar(tag="loss/log_step", scalar_value=loss_local, global_step=global_step)
-
-                    sum_img = sum(images_per_sec_log_step)
-                    avg = sum_img / len(images_per_sec_log_step)
-                    images_per_sec_log_step = []
-                    if args.amp:
-                        log_writer.add_scalar(tag="hyperparameter/grad scale", scalar_value=ed_optimizer.get_scale(), global_step=global_step)
-                    log_writer.add_scalar(tag="performance/images per second", scalar_value=avg, global_step=global_step)
-
-                    logs = {"loss/log_step": loss_local, "lr_unet": lr_unet, "lr_te": lr_textenc, "img/s": images_per_sec}
-                    append_epoch_log(global_step=global_step, epoch_pbar=epoch_pbar, gpu=gpu, log_writer=log_writer, **logs)
-                    torch.cuda.empty_cache()
-
-                if validator and step in validation_steps:
-                    validator.do_validation(global_step, get_model_prediction_and_target)
-
-                if (global_step + 1) % sample_generator.sample_steps == 0:
-                    generate_samples(global_step=global_step, batch=batch)
-
-                min_since_last_ckpt =  (time.time() - last_epoch_saved_time) / 60
-
-                if args.ckpt_every_n_minutes is not None and (min_since_last_ckpt > args.ckpt_every_n_minutes):
-                    last_epoch_saved_time = time.time()
-                    logging.info(f"Saving model, {args.ckpt_every_n_minutes} mins at step {global_step}")
-                    save_path = make_save_path(epoch, global_step)
-                    __save_model(save_path, unet, text_encoder, tokenizer, noise_scheduler, vae, ed_optimizer, args.save_ckpt_dir, yaml, args.save_full_precision, args.save_optimizer, save_ckpt=not args.no_save_ckpt)
-
-                if epoch > 0 and epoch % args.save_every_n_epochs == 0 and step == 0 and epoch < args.max_epochs - 1 and epoch >= args.save_ckpts_from_n_epochs:
-                    logging.info(f" Saving model, {args.save_every_n_epochs} epochs at step {global_step}")
-                    save_path = make_save_path(epoch, global_step)
-                    __save_model(save_path, unet, text_encoder, tokenizer, noise_scheduler, vae, ed_optimizer, args.save_ckpt_dir, yaml, args.save_full_precision, args.save_optimizer, save_ckpt=not args.no_save_ckpt)
-
-                del batch
-                global_step += 1
-                # end of step
-
-            steps_pbar.close()
-
-            elapsed_epoch_time = (time.time() - epoch_start_time) / 60
-            epoch_times.append(dict(epoch=epoch, time=elapsed_epoch_time))
-            log_writer.add_scalar("performance/minutes per epoch", elapsed_epoch_time, global_step)
-
-            epoch_pbar.update(1)
-            if epoch < args.max_epochs - 1:
-                train_batch.shuffle(epoch_n=epoch, max_epochs = args.max_epochs)
-                write_batch_schedule(args, log_folder, train_batch, epoch + 1)
-
-            loss_local = sum(loss_epoch) / len(loss_epoch)
-            log_writer.add_scalar(tag="loss/epoch", scalar_value=loss_local, global_step=global_step)
-
-            gc.collect()
-            # end of epoch
-
-        # end of training
-        epoch = args.max_epochs
-        save_path = make_save_path(epoch, global_step, prepend=("" if args.no_prepend_last else "last-"))
-        __save_model(save_path, unet, text_encoder, tokenizer, noise_scheduler, vae, ed_optimizer, args.save_ckpt_dir, yaml, args.save_full_precision, args.save_optimizer, save_ckpt=not args.no_save_ckpt)
-
-        total_elapsed_time = time.time() - training_start_time
-        logging.info(f"{Fore.CYAN}Training complete{Style.RESET_ALL}")
-        logging.info(f"Total training time took {total_elapsed_time/60:.2f} minutes, total steps: {global_step}")
-        logging.info(f"Average epoch time: {np.mean([t['time'] for t in epoch_times]):.2f} minutes")
-
-    except Exception as ex:
-        logging.error(f"{Fore.LIGHTYELLOW_EX}Something went wrong, attempting to save model{Style.RESET_ALL}")
-        save_path = make_save_path(epoch, global_step, prepend="errored-")
-        __save_model(save_path, unet, text_encoder, tokenizer, noise_scheduler, vae, ed_optimizer, args.save_ckpt_dir, yaml, args.save_full_precision, args.save_optimizer, save_ckpt=not args.no_save_ckpt)
-        raise ex
-
+    total_elapsed_time = time.time() - training_start_time
+    logging.info(f"{Fore.CYAN}Training complete{Style.RESET_ALL}")
+    logging.info(f"Total training time took {total_elapsed_time/60:.2f} minutes, total steps: {global_step}")
+    logging.info(f"Average epoch time: {np.mean([t['time'] for t in epoch_times]):.2f} minutes")
     logging.info(f"{Fore.LIGHTWHITE_EX} ***************************{Style.RESET_ALL}")
     logging.info(f"{Fore.LIGHTWHITE_EX} **** Finished training ****{Style.RESET_ALL}")
     logging.info(f"{Fore.LIGHTWHITE_EX} ***************************{Style.RESET_ALL}")
+    return epoch
 
+def log_step(args, gpu, log_writer, ed_optimizer, epoch_pbar, loss_log_step, images_per_sec_log_step, images_per_sec):
+    if (global_step + 1) % args.log_step == 0:
+        loss_local = sum(loss_log_step) / len(loss_log_step)
+        lr_unet = ed_optimizer.get_unet_lr()
+        lr_textenc = ed_optimizer.get_textenc_lr()
+        loss_log_step = []
+                    
+        log_writer.add_scalar(tag="hyperparameter/lr unet", scalar_value=lr_unet, global_step=global_step)
+        log_writer.add_scalar(tag="hyperparameter/lr text encoder", scalar_value=lr_textenc, global_step=global_step)
+        log_writer.add_scalar(tag="loss/log_step", scalar_value=loss_local, global_step=global_step)
+
+        sum_img = sum(images_per_sec_log_step)
+        avg = sum_img / len(images_per_sec_log_step)
+        images_per_sec_log_step = []
+        if args.amp:
+            log_writer.add_scalar(tag="hyperparameter/grad scale", scalar_value=ed_optimizer.get_scale(), global_step=global_step)
+        log_writer.add_scalar(tag="performance/images per second", scalar_value=avg, global_step=global_step)
+
+        logs = {"loss/log_step": loss_local, "lr_unet": lr_unet, "lr_te": lr_textenc, "img/s": images_per_sec}
+        append_epoch_log(global_step=global_step, epoch_pbar=epoch_pbar, gpu=gpu, log_writer=log_writer, **logs)
+        torch.cuda.empty_cache()
+
+
+
+class Trainer:
+    def __init__(self, args, log_time, log_folder, optimizer_config):
+        self.args = args
+        self.log_time = log_time
+        self.log_folder = log_folder
+        self.optimizer_config = optimizer_config
+        self.optimizer_config_path = args.optimizer_config_path
+        self.validator = None
+        self.train_dataloader = None
+
+    def main(self):
+        """
+        Main entry point
+        """
+        args, log_time, seed, device, gpu, log_folder = init(self.args)
+
+        yaml, text_encoder, vae, unet, reference_scheduler, noise_scheduler, tokenizer, optimizer_config = load_models(self.args, device)
+
+        log_writer = setup_logging(self.args, log_time, log_folder, optimizer_config)
+
+        validator, train_batch = create_image_loaders(self.args, seed, log_folder, tokenizer, log_writer)
+
+        torch.cuda.benchmark = False
+
+        epoch_len = math.ceil(len(train_batch) / self.args.batch_size)
+
+        ed_optimizer = EveryDreamOptimizer(self.args,
+                                        optimizer_config,
+                                        text_encoder,
+                                        unet,
+                                        epoch_len)
+
+        log_self.args(log_writer, self.args)
+
+        sample_generator = SampleGenerator(log_folder=log_folder, log_writer=log_writer,
+                                        default_resolution=self.args.resolution, default_seed=self.args.seed,
+                                        config_file_path=self.args.sample_prompts,
+                                        batch_size=max(1,self.args.batch_size//2),
+                                        default_sample_steps=self.args.sample_steps,
+                                        use_xformers=is_xformers_available() and not self.args.disable_xformers,
+                                        use_penultimate_clip_layer=(self.args.clip_skip >= 2)
+                                        )
+
+        """
+        Train the model
+
+        """
+        train_dataloader, epoch_pbar, epoch_times, training_start_time, last_epoch_saved_time, loss_log_step = perform_train_setup(self.args, gpu, log_folder, text_encoder, vae, unet, noise_scheduler, tokenizer, log_writer, train_batch, epoch_len, ed_optimizer)
+
+        # Pre-train validation to establish a starting point on the loss graph
+        if validator:
+            validator.do_validation(global_step=0,
+                                    get_model_prediction_and_target_callable=get_model_prediction_and_target)
+
+        # the sample generator might be configured to generate samples before step 0
+        if sample_generator.generate_pretrain_samples:
+            _, batch = next(enumerate(train_dataloader))
+            generate_samples(global_step=0, sample_generator=sample_generator, unet=unet, text_encoder=text_encoder, tokenizer=tokenizer, vae=vae, reference_scheduler=reference_scheduler, device=device, batch=batch)
+
+        try:
+            write_batch_schedule(self.args, log_folder, train_batch, epoch = 0)
+
+            for epoch in range(self.args.max_epochs):
+                loss_epoch, epoch_start_time, steps_pbar = do_epoch(self.args, gpu, yaml, text_encoder, vae, unet, noise_scheduler, tokenizer, log_writer, validator, train_batch, ed_optimizer, sample_generator, train_dataloader, epoch_pbar, last_epoch_saved_time, loss_log_step, epoch)
+                    # end of step
+
+                log_epoch(self.args, log_folder, log_writer, train_batch, epoch_pbar, epoch_times, epoch, loss_epoch, epoch_start_time, steps_pbar)
+
+                gc.collect()
+                # end of epoch
+
+            # end of training
+            epoch = complete_training(self.args, yaml, text_encoder, vae, unet, noise_scheduler, tokenizer, ed_optimizer, epoch_times, training_start_time)
+
+        except Exception as ex:
+            logging.error(f"{Fore.LIGHTYELLOW_EX}Something went wrong, attempting to save model{Style.RESET_ALL}")
+            save_path = make_save_path(epoch, global_step, prepend="errored-")
+            __save_model(save_path, unet, text_encoder, tokenizer, noise_scheduler, vae, ed_optimizer, self.args.save_ckpt_dir, yaml, self.args.save_full_precision, self.args.save_optimizer, save_ckpt=not self.args.no_save_ckpt)
+            raise ex
+    def do_epoch(self, train_batch):
+        loss_epoch = []
+        epoch_start_time = time.time()
+        images_per_sec_log_step = []
+
+        epoch_len = math.ceil(len(train_batch) / self.args.batch_size)
+        steps_pbar = tqdm(range(epoch_len), position=1, leave=False, dynamic_ncols=True)
+        steps_pbar.set_description(f"{Fore.LIGHTCYAN_EX}Steps{Style.RESET_ALL}")
+
+        validation_steps = (
+                    [] if self.validator is None
+                    else self.validator.get_validation_step_indices(epoch, len(train_dataloader))
+                )
+
+        for step, batch in enumerate(self.train_dataloader):
+            images_per_sec = self.do_step(self.args, text_encoder, vae, unet, noise_scheduler, ed_optimizer, loss_log_step, batch, loss_epoch, images_per_sec_log_step, steps_pbar, step)
+
+            log_step(self.args, gpu, log_writer, ed_optimizer, epoch_pbar, loss_log_step, images_per_sec_log_step, images_per_sec)
+
+            if validator and step in validation_steps:
+                validator.do_validation(global_step, get_model_prediction_and_target)
+
+            if (global_step + 1) % sample_generator.sample_steps == 0:
+                generate_samples(global_step=global_step, batch=batch)
+
+            min_since_last_ckpt =  (time.time() - last_epoch_saved_time) / 60
+
+            if self.args.ckpt_every_n_minutes is not None and (min_since_last_ckpt > self.args.ckpt_every_n_minutes):
+                last_epoch_saved_time = time.time()
+                logging.info(f"Saving model, {self.args.ckpt_every_n_minutes} mins at step {global_step}")
+                save_path = make_save_path(epoch, global_step)
+                __save_model(save_path, unet, text_encoder, tokenizer, noise_scheduler, vae, ed_optimizer, self.args.save_ckpt_dir, yaml, self.args.save_full_precision, self.args.save_optimizer, save_ckpt=not self.args.no_save_ckpt)
+
+            if epoch > 0 and epoch % self.args.save_every_n_epochs == 0 and step == 0 and epoch < self.args.max_epochs - 1 and epoch >= self.args.save_ckpts_from_n_epochs:
+                logging.info(f" Saving model, {self.args.save_every_n_epochs} epochs at step {global_step}")
+                save_path = make_save_path(epoch, global_step)
+                __save_model(save_path, unet, text_encoder, tokenizer, noise_scheduler, vae, ed_optimizer, self.args.save_ckpt_dir, yaml, self.args.save_full_precision, self.args.save_optimizer, save_ckpt=not self.args.no_save_ckpt)
+
+            del batch
+            global_step += 1
+        return loss_epoch,epoch_start_time,steps_pbar
+    def train(self):
+        data_loader = DataLoaderMultiAspect(
+            image_train_items=self.args.image_train_items,
+            seed=self.args.seed,
+            batch_size=self.args.batch_size,
+            grad_accum=self.args.grad_accum,
+        )
+
+        self.train_batch = EveryDreamBatch(
+            data_loader=data_loader,
+            debug_level=1,
+            conditional_dropout=self.args.cond_dropout,
+            tokenizer=self.tokenizer,
+            seed=self.args.seed,
+            shuffle_tags=self.args.shuffle_tags,
+            rated_dataset=self.args.rated_dataset,
+            rated_dataset_dropout_target=(
+                1.0
+                - (self.args.rated_dataset_target_dropout_percent / 100.0)
+            ),
+        )
+
+        self.validator = None
+        if self.args.validation:
+            self.validator = EveryDreamBatch(
+                data_loader=self.args.validation,
+                debug_level=1,
+                conditional_dropout=self.args.cond_dropout,
+                tokenizer=self.tokenizer,
+                seed=self.args.seed,
+                shuffle_tags=self.args.shuffle_tags,
+                rated_dataset=self.args.rated_dataset,
+                rated_dataset_dropout_target=(
+                    1.0
+                    - (self.args.rated_dataset_target_dropout_percent / 100.0)
+                ),
+            )
+
+        return self.validator, self.train_batch
+
+    def setup_logging(self):
+        if self.args.wandb:
+            wandb.tensorboard.patch(
+                root_logdir=self.log_folder,
+                pytorch=False,
+                tensorboard_x=False,
+                save=False,
+            )
+            wandb_run = wandb.init(
+                project=self.args.project_name,
+                config={
+                    "main_cfg": vars(self.args),
+                    "optimizer_cfg": self.optimizer_config,
+                },
+                name=self.args.run_name,
+            )
+            try:
+                if webbrowser.get():
+                    webbrowser.open(wandb_run.url, new=2)
+            except Exception:
+                pass
+
+        self.log_writer = SummaryWriter(
+            log_dir=self.log_folder,
+            flush_secs=20,
+            comment=(
+                self.args.run_name
+                if self.args.run_name is not None
+                else self.log_time
+            ),
+        )
+
+        return self.log_writer
+
+    def load_models(self, device):
+        optimizer_state_path = None
+        try:
+            # check for a local file
+            hf_cache_path = get_hf_ckpt_cache_path(self.args.resume_ckpt)
+            if (
+                os.path.exists(hf_cache_path)
+                or os.path.exists(self.args.resume_ckpt)
+            ):
+                model_root_folder, is_sd1attn, yaml = convert_to_hf(
+                    self.args.resume_ckpt
+                )
+                self.text_encoder = CLIPTextModel.from_pretrained(
+                    model_root_folder, subfolder="text_encoder"
+                )
+                self.vae = AutoencoderKL.from_pretrained(
+                    model_root_folder, subfolder="vae"
+                )
+                self.unet = UNet2DConditionModel.from_pretrained(
+                    model_root_folder, subfolder="unet"
+                )
+
+                optimizer_state_path = os.path.join(
+                    self.args.resume_ckpt, "optimizer.pt"
+                )
+                if not os.path.exists(optimizer_state_path):
+                    optimizer_state_path = None
+            else:
+                # try to download from HF using resume_ckpt as a repo id
+                downloaded = try_download_model_from_hf(
+                    repo_id=self.args.resume_ckpt
+                )
+                if downloaded is None:
+                    raise ValueError(
+                        f"No local file/folder for {self.args.resume_ckpt}, and no matching huggingface.co repo could be downloaded"
+                    )
+                pipe, model_root_folder, is_sd1attn, yaml = downloaded
+                self.text_encoder = pipe.text_encoder
+                self.vae = pipe.vae
+                self.unet = pipe.unet
+                del pipe
+
+            _args = {
+                "subfolder": "scheduler",
+                "rescale_betas_zero_snr": self.args.enable_zero_terminal_snr,
+                "timestep_spacing": (
+                    "trailing"
+                    if self.args.enable_trailing_timesteps
+                    else "leading"
+                ),
+                "prediction_type": (
+                    "v_prediction" if self.args.v_prediction else None
+                ),
+            }
+            self.reference_scheduler = DDIMScheduler.from_pretrained(
+                self.args.model_root_folder, **_args
+            )
+            self.noise_scheduler = DDPMScheduler.from_pretrained(
+                self.args.model_root_folder,
+                subfolder="scheduler",
+                trained_betas=self.reference_scheduler.betas.detach().clone(),
+            )
+
+            self.tokenizer = CLIPTokenizer.from_pretrained(
+                model_root_folder, subfolder="tokenizer", use_fast=False
+            )
+
+        except Exception as e:
+            traceback.print_exc()
+            logging.error(" * Failed to load checkpoint *")
+            raise
+
+        if self.args.gradient_checkpointing:
+            self.unet.enable_gradient_checkpointing()
+            self.text_encoder.gradient_checkpointing_enable()
+
+        if not self.args.disable_xformers:
+            if (self.args.amp and is_sd1attn) or (not is_sd1attn):
+                try:
+                    self.unet.enable_xformers_memory_efficient_attention()
+                    logging.info("Enabled xformers")
+                except Exception as ex:
+                    logging.warning(
+                        "failed to load xformers, using attention slicing instead"
+                    )
+                    self.unet.set_attention_slice("auto")
+                    pass
+            elif (not self.args.amp and is_sd1attn):
+                logging.info(
+                    "AMP is disabled but model is SD1.X, using attention slicing instead of xformers"
+                )
+                self.unet.set_attention_slice("auto")
+        else:
+            logging.info(
+                "xformers disabled via arg, using attention slicing instead"
+            )
+            self.unet.set_attention_slice("auto")
+
+        self.vae = self.vae.to(
+            device, dtype=torch.float16 if self.args.amp else torch.float32
+        )
+        self.unet = self.unet.to(device, dtype=torch.float32)
+        if (
+            self.args.disable_textenc_training
+            and self.args.amp
+        ):
+            self.text_encoder = self.text_encoder.to(
+                device, dtype=torch.float16
+            )
+        else:
+            self.text_encoder = self.text_encoder.to(
+                device, dtype=torch.float32
+            )
+
+        try:
+            torch.compile(self.unet)
+            torch.compile(self.text_encoder)
+            torch.compile(self.vae)
+            logging.info("Successfully compiled models")
+        except Exception as ex:
+            logging.warning(
+                f"Failed to compile model, continuing anyway, ex: {ex}"
+            )
+            pass
+
+        
+        self.optimizer_config_path = (
+            self.args.optimizer_config
+            if self.args.optimizer_config
+            else "optimizer.json"
+        )
+        if os.path.exists(
+            os.path.join(os.curdir, self.optimizer_config_path)
+        ):
+            with open(
+                os.path.join(os.curdir, self.optimizer_config_path), "r"
+            ) as f:
+                self.optimizer_config = json.load(f)
+    def do_step(self, args, text_encoder, vae, unet, noise_scheduler, ed_optimizer, loss_log_step, batch, loss_epoch, images_per_sec_log_step, steps_pbar, step):
+        step_start_time = time.time()
+
+        model_pred, target = get_model_prediction_and_target(batch["image"], batch["tokens"], vae, text_encoder, noise_scheduler, unet, args.zero_frequency_noise_ratio)
+
+        loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+
+        del target, model_pred
+
+        if batch["runt_size"] > 0:
+            loss_scale = batch["runt_size"] / args.batch_size
+            loss = loss * loss_scale
+
+        ed_optimizer.step(loss, step, global_step)
+
+        loss_step = loss.detach().item()
+
+        steps_pbar.set_postfix({"loss/step": loss_step}, {"gs": global_step})
+        steps_pbar.update(1)
+
+        images_per_sec = args.batch_size / (time.time() - step_start_time)
+        images_per_sec_log_step.append(images_per_sec)
+
+        loss_log_step.append(loss_step)
+        loss_epoch.append(loss_step)
+        return images_per_sec
+
+    def perform_train_setup(self, args, gpu, log_folder, text_encoder, vae, unet, noise_scheduler, tokenizer, log_writer, train_batch, epoch_len, ed_optimizer):
+        print(f" {Fore.LIGHTGREEN_EX}** Welcome to EveryDream trainer 2.0!**{Style.RESET_ALL}")
+        print(f" (C) 2022-2023 Victor C Hall  This program is licensed under AGPL 3.0 https://www.gnu.org/licenses/agpl-3.0.en.html")
+        print()
+        print("** Trainer Starting **")
+
+        global interrupted
+        interrupted = False
+
+        
+        signal.signal(signal.SIGINT, create_sigterm_handler(log_folder, unet, text_encoder, tokenizer, noise_scheduler, vae, ed_optimizer, args))
+
+        if not os.path.exists(f"{log_folder}/samples/"):
+            os.makedirs(f"{log_folder}/samples/")
+
+        if gpu is not None:
+            gpu_used_mem, gpu_total_mem = gpu.get_gpu_memory()
+            logging.info(f" Pretraining GPU Memory: {gpu_used_mem} / {gpu_total_mem} MB")
+        logging.info(f" saving ckpts every {args.ckpt_every_n_minutes} minutes")
+        logging.info(f" saving ckpts every {args.save_every_n_epochs } epochs")
+
+        train_dataloader = build_torch_dataloader(train_batch, batch_size=args.batch_size)
+
+        unet.train() if not args.disable_unet_training else unet.eval()
+        text_encoder.train() if not args.disable_textenc_training else text_encoder.eval()
+
+        logging.info(f" unet device: {unet.device}, precision: {unet.dtype}, training: {unet.training}")
+        logging.info(f" text_encoder device: {text_encoder.device}, precision: {text_encoder.dtype}, training: {text_encoder.training}")
+        logging.info(f" vae device: {vae.device}, precision: {vae.dtype}, training: {vae.training}")
+        logging.info(f" scheduler: {noise_scheduler.__class__}")
+
+        logging.info(f" {Fore.GREEN}Project name: {Style.RESET_ALL}{Fore.LIGHTGREEN_EX}{args.project_name}{Style.RESET_ALL}")
+        logging.info(f" {Fore.GREEN}grad_accum: {Style.RESET_ALL}{Fore.LIGHTGREEN_EX}{args.grad_accum}{Style.RESET_ALL}"),
+        logging.info(f" {Fore.GREEN}batch_size: {Style.RESET_ALL}{Fore.LIGHTGREEN_EX}{args.batch_size}{Style.RESET_ALL}")
+        logging.info(f" {Fore.GREEN}epoch_len: {Fore.LIGHTGREEN_EX}{epoch_len}{Style.RESET_ALL}")
+
+        epoch_pbar = tqdm(range(args.max_epochs), position=0, leave=True, dynamic_ncols=True)
+        epoch_pbar.set_description(f"{Fore.LIGHTCYAN_EX}Epochs{Style.RESET_ALL}")
+        epoch_times = []
+
+        global global_step
+        global_step = 0
+        training_start_time = time.time()
+        last_epoch_saved_time = training_start_time
+
+        append_epoch_log(global_step=global_step, epoch_pbar=epoch_pbar, gpu=gpu, log_writer=log_writer)
+
+        loss_log_step = []
+
+        assert len(train_batch) > 0, "train_batch is empty, check that your data_root is correct"
+        return train_dataloader,epoch_pbar,epoch_times,training_start_time,last_epoch_saved_time,loss_log_step
 
 if __name__ == "__main__":
     check_git()
@@ -934,6 +1023,7 @@ if __name__ == "__main__":
     experimental_group.add_argument("--v_prediction", action="store_true", default=False, help="enable v prediction loss (def: False)")
     experimental_group.add_argument("--enable_trailing_timesteps", action="store_true", default=False, help="enable trailing timesteps (def: False)")
     experimental_group.add_argument("--enable_zero_terminal_snr", action="store_true", default=False, help="enable zero terminal SNR (def: False)")
+    experimental_group.add_argument("--sweep", action="store_true", default=False, help="enable sweep mode, disables saving and runs until terminated on the same dataset.(def: False)")
     # load CLI args to overwrite existing config args
     args = argparser.parse_args(args=argv, namespace=args)
     
