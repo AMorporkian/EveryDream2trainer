@@ -458,16 +458,9 @@ def main(args):
             unet = pipe.unet
             del pipe
         
-        if args.zero_frequency_noise_ratio == -1.0:
-            # use zero terminal SNR, currently backdoor way to enable it by setting ZFN to -1, still in testing
-            from utils.unet_utils import enforce_zero_terminal_snr
-            temp_scheduler = DDIMScheduler.from_pretrained(model_root_folder, subfolder="scheduler")
-            trained_betas = enforce_zero_terminal_snr(temp_scheduler.betas).numpy().tolist()
-            reference_scheduler = DDIMScheduler.from_pretrained(model_root_folder, subfolder="scheduler", trained_betas=trained_betas)
-            noise_scheduler = DDPMScheduler.from_pretrained(model_root_folder, subfolder="scheduler", trained_betas=trained_betas)
-        else:
-            reference_scheduler = DDIMScheduler.from_pretrained(model_root_folder, subfolder="scheduler")
-            noise_scheduler = DDPMScheduler.from_pretrained(model_root_folder, subfolder="scheduler")
+        _args = {"subfolder": "scheduler", "rescale_betas_zero_snr": args.enable_zero_terminal_snr, "timestep_spacing": "trailing" if args.enable_trailing_timesteps else "leading", "prediction_type": "v_prediction" if args.v_prediction else None} 
+        reference_scheduler = DDIMScheduler.from_pretrained(model_root_folder, **_args)
+        noise_scheduler = DDPMScheduler.from_pretrained(model_root_folder, subfolder="scheduler", trained_betas=reference_scheduler.betas.detach().clone())
 
         tokenizer = CLIPTokenizer.from_pretrained(model_root_folder, subfolder="tokenizer", use_fast=False)
 
@@ -934,7 +927,13 @@ if __name__ == "__main__":
     argparser.add_argument("--rated_dataset", action="store_true", default=False, help="enable rated image set training, to less often train on lower rated images through the epochs")
     argparser.add_argument("--rated_dataset_target_dropout_percent", type=int, default=50, help="how many images (in percent) should be included in the last epoch (Default 50)")
     argparser.add_argument("--zero_frequency_noise_ratio", type=float, default=0.02, help="adds zero frequency noise, for improving contrast (def: 0.0) use 0.0 to 0.15, set to -1 to use zero terminal SNR noising beta schedule instead")
+    # create an argument group for experimental arguments
+    experimental_group = argparser.add_argument_group('experimental')
 
+    # add the experimental arguments to the group
+    experimental_group.add_argument("--v_prediction", action="store_true", default=False, help="enable v prediction loss (def: False)")
+    experimental_group.add_argument("--enable_trailing_timesteps", action="store_true", default=False, help="enable trailing timesteps (def: False)")
+    experimental_group.add_argument("--enable_zero_terminal_snr", action="store_true", default=False, help="enable zero terminal SNR (def: False)")
     # load CLI args to overwrite existing config args
     args = argparser.parse_args(args=argv, namespace=args)
     
