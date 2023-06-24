@@ -470,7 +470,7 @@ def main(args):
         
         _args = {"subfolder": "scheduler", "rescale_betas_zero_snr": args.enable_zero_terminal_snr, "timestep_spacing": "trailing" if args.enable_trailing_timesteps else "leading", "prediction_type": "v_prediction" if args.v_prediction else None} 
         reference_scheduler = DDIMScheduler.from_pretrained(model_root_folder, **_args)
-        noise_scheduler = DDPMScheduler.from_pretrained(model_root_folder, subfolder="scheduler", trained_betas=reference_scheduler.betas.detach().clone())
+        noise_scheduler = DDPMScheduler.from_pretrained(model_root_folder, subfolder="scheduler", trained_betas=reference_scheduler.betas.numpy().tolist())
 
         tokenizer = CLIPTokenizer.from_pretrained(model_root_folder, subfolder="tokenizer", use_fast=False)
 
