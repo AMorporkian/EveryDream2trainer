@@ -679,7 +679,7 @@ def main(args):
 
             noise_fn = torch.randn_like
             if args.pyramid_noise:
-                noise_fn = lambda x: pyramid_noise_like(x, discount=args.pyramid_noise_discount)
+                noise_fn = lambda x: pyramid_noise_like(x, discount=args.discount)
             if zero_frequency_noise_ratio > 0.0:
                 # see https://www.crosslabs.org//blog/diffusion-with-offset-noise
                 zero_frequency_noise = zero_frequency_noise_ratio * torch.randn(latents.shape[0], latents.shape[1], 1, 1, device=latents.device)
