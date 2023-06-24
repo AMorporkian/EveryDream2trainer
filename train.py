@@ -143,6 +143,16 @@ def setup_local_logger(args):
 #     Loads the optimizer state
 #     """
 #     optimizer.load_state_dict(torch.load(path))
+def pyramid_noise_like(x, discount=0.8):
+  b, c, w, h = x.shape # EDIT: w and h get over-written, rename for a different variant!
+  u = nn.Upsample(size=(w, h), mode='bilinear')
+  noise = torch.randn_like(x)
+  for i in range(10):
+    r = random.random()*2+2 # Rather than always going 2x, 
+    w, h = max(1, int(w/(r**i))), max(1, int(h/(r**i)))
+    noise += u(torch.randn(b, c, w, h).to(x)) * discount**i
+    if w==1 or h==1: break # Lowest resolution is 1x1
+  return noise/noise.std() # Scaled back to roughly unit variance
 
 def get_gpu_memory(nvsmi):
     """
@@ -667,12 +677,15 @@ def main(args):
             del pixel_values
             latents = latents[0].sample() * 0.18215
 
+            noise_fn = torch.randn_like
+            if args.noise_type == "pyramid_noise":
+                noise_fn = lambda x: pyramid_noise_like(x, discount=args.pyramid_noise_discount)
             if zero_frequency_noise_ratio > 0.0:
                 # see https://www.crosslabs.org//blog/diffusion-with-offset-noise
                 zero_frequency_noise = zero_frequency_noise_ratio * torch.randn(latents.shape[0], latents.shape[1], 1, 1, device=latents.device)
-                noise = torch.randn_like(latents) + zero_frequency_noise
+                noise = noise_fn(latents) + zero_frequency_noise
             else:
-                noise = torch.randn_like(latents)
+                noise = noise_fn(latents)
 
             bsz = latents.shape[0]
 
@@ -928,12 +941,15 @@ if __name__ == "__main__":
     argparser.add_argument("--rated_dataset_target_dropout_percent", type=int, default=50, help="how many images (in percent) should be included in the last epoch (Default 50)")
     argparser.add_argument("--zero_frequency_noise_ratio", type=float, default=0.02, help="adds zero frequency noise, for improving contrast (def: 0.0) use 0.0 to 0.15, set to -1 to use zero terminal SNR noising beta schedule instead")
     # create an argument group for experimental arguments
+    
     experimental_group = argparser.add_argument_group('experimental')
 
     # add the experimental arguments to the group
     experimental_group.add_argument("--v_prediction", action="store_true", default=False, help="enable v prediction loss (def: False)")
     experimental_group.add_argument("--enable_trailing_timesteps", action="store_true", default=False, help="enable trailing timesteps (def: False)")
     experimental_group.add_argument("--enable_zero_terminal_snr", action="store_true", default=False, help="enable zero terminal SNR (def: False)")
+    experimental_group.add_argument("--pyramid-noise", action="store_true", default=False, help="enable pyramid noise (def: False)")
+    experimental_group.add_argument("--discount", type=float, default=0.8, help="Discount factor for pyramid noise")
     # load CLI args to overwrite existing config args
     args = argparser.parse_args(args=argv, namespace=args)
     
