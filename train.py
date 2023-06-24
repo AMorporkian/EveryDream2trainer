@@ -678,7 +678,7 @@ def main(args):
             latents = latents[0].sample() * 0.18215
 
             noise_fn = torch.randn_like
-            if args.noise_type == "pyramid_noise":
+            if args.pyramid_noise:
                 noise_fn = lambda x: pyramid_noise_like(x, discount=args.pyramid_noise_discount)
             if zero_frequency_noise_ratio > 0.0:
                 # see https://www.crosslabs.org//blog/diffusion-with-offset-noise
@@ -948,7 +948,7 @@ if __name__ == "__main__":
     experimental_group.add_argument("--v_prediction", action="store_true", default=False, help="enable v prediction loss (def: False)")
     experimental_group.add_argument("--enable_trailing_timesteps", action="store_true", default=False, help="enable trailing timesteps (def: False)")
     experimental_group.add_argument("--enable_zero_terminal_snr", action="store_true", default=False, help="enable zero terminal SNR (def: False)")
-    experimental_group.add_argument("--pyramid-noise", action="store_true", default=False, help="enable pyramid noise (def: False)")
+    experimental_group.add_argument("--pyramid_noise", action="store_true", default=False, help="enable pyramid noise (def: False)")
     experimental_group.add_argument("--discount", type=float, default=0.8, help="Discount factor for pyramid noise")
     # load CLI args to overwrite existing config args
     args = argparser.parse_args(args=argv, namespace=args)
