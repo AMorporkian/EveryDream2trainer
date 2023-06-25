@@ -667,7 +667,9 @@ def main(args):
     loss_log_step = []
 
     assert len(train_batch) > 0, "train_batch is empty, check that your data_root is correct"
-
+    def lerp(a, b, t):
+        return a + (b - a) * t
+    
     # actual prediction function - shared between train and validate
     def get_model_prediction_and_target(image, tokens, zero_frequency_noise_ratio=0.0):
         with torch.no_grad():
@@ -679,7 +681,7 @@ def main(args):
 
             noise_fn = torch.randn_like
             if args.pyramid_noise:
-                noise_fn = lambda x: pyramid_noise_like(x, discount=args.discount)
+                noise_fn = lambda x: pyramid_noise_like(x, discount=lerp(0, args.discount, global_step / args.discount_warmup_steps))
             if zero_frequency_noise_ratio > 0.0:
                 # see https://www.crosslabs.org//blog/diffusion-with-offset-noise
                 zero_frequency_noise = zero_frequency_noise_ratio * torch.randn(latents.shape[0], latents.shape[1], 1, 1, device=latents.device)
@@ -950,6 +952,7 @@ if __name__ == "__main__":
     experimental_group.add_argument("--enable_zero_terminal_snr", action="store_true", default=False, help="enable zero terminal SNR (def: False)")
     experimental_group.add_argument("--pyramid_noise", action="store_true", default=False, help="enable pyramid noise (def: False)")
     experimental_group.add_argument("--discount", type=float, default=0.8, help="Discount factor for pyramid noise")
+    experimental_group.add_argument("--discount_warmup_steps", type=int, default=0, help="warmup steps for discount")
     # load CLI args to overwrite existing config args
     args = argparser.parse_args(args=argv, namespace=args)
     
