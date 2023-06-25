@@ -21,7 +21,6 @@ import math
 import signal
 import argparse
 import logging
-import threading
 import time
 import gc
 import random
@@ -29,20 +28,19 @@ import traceback
 import shutil
 
 import torch.nn.functional as F
+import torch.nn as nn
+
 from torch.cuda.amp import autocast
 
 from colorama import Fore, Style
 import numpy as np
-import itertools
 import torch
 import datetime
 import json
 from tqdm.auto import tqdm
 
-from diffusers import StableDiffusionPipeline, AutoencoderKL, UNet2DConditionModel, DDIMScheduler, DDPMScheduler, \
-    DPMSolverMultistepScheduler
+from diffusers import StableDiffusionPipeline, AutoencoderKL, UNet2DConditionModel, DDIMScheduler, DDPMScheduler
 #from diffusers.models import AttentionBlock
-from diffusers.optimization import get_scheduler
 from diffusers.utils.import_utils import is_xformers_available
 from transformers import CLIPTextModel, CLIPTokenizer
 #from accelerate import Accelerator
